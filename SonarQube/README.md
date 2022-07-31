@@ -3,7 +3,7 @@
 * AWS EC2 (at least t2.small)
 * JDK 11
 * Latest docker , docker-compose
-* PostgreSQL 13
+* PostgreSQL 12
 * Linux 20.4
 
 I will use docker-compose so I create docker-compose.yml file. You can check it.
