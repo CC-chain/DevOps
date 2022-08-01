@@ -1,3 +1,4 @@
+
 # Integrating SonarQube as a pull request approver on AWS CodeCommit
 
 In this project, our main goal is using AWS CodeCommit's pull request approver which is integrated with SonarQube. Approval rules act as a gate on your source code changes. Pull request which fail to satisfy the required approvals cannot be merged into your branches. CodeCommit launched the ability to create [_approval rule templates_](https://docs.aws.amazon.com/codecommit/latest/userguide/approval-rule-templates.html), which are rulesets that can automatically be applied to all pull requests created for one or more repositories in your AWS account. With templates, it becomes simple to create rules like “require one approver from my team” for any number of repositories in your AWS account.
@@ -36,7 +37,7 @@ The following diagram shows the flow of data, starting with a new or updated pul
 For this integration, you need to create some AWS resources:
 
 -   AWS CodeCommit repository
--   AWS CodeBuild project
+-   AWS CodeBuild project 
 -   Amazon CloudWatch Events rule (to trigger builds when pull requests are created or updated)
 -   IAM role (for CodeBuild to assume)
 -   IAM role (for CloudWatch Events to assume and invoke CodeBuild)
@@ -244,3 +245,136 @@ Resources: # declares the AWS resources that you want to include in the stack
               'ForAnyValue:StringEquals':
                 'secretsmanager:VersionStage': AWSCURRENT
 ```
+1.  Download or copy the  [CloudFormation template from GitHub](https://github.com/CC-chain/DevOps/blob/main/SonarQube_Pull_Request_Approver/template.yaml)  and save it as  `template.yaml`  on your local computer.
+2.  At the  [CloudFormation console](https://console.aws.amazon.com/cloudformation/home), choose  **Create Stack (with new resources)**.
+3.  Choose  **Upload a template file**.
+4.  Choose  **Choose file**  and select the  `template.yaml`  file you just saved.
+5.  Choose  **Next**.
+6.  Give your stack a name, optionally update the CodeCommit repository name and description, and paste in the username and password of the SonarQube user you created.
+7.  Choose  **Next**.
+8.  Review the stack options and choose  **Next**.
+9.  On  **Step 4**, review your stack, acknowledge the required capabilities, and choose  **Create Stack**.
+10.  Wait for the stack creation to complete before proceeding.
+11.  Before leaving the AWS CloudFormation console, choose the  **Resources**  tab and note down the newly created CodeBuildRole’s  **Physical Id**, as shown in the following screenshot. You need this in the next step.
+<p align="center">
+<img src="https://d2908q01vomqb2.cloudfront.net/7719a1c782a1ba91c031a682a0a2f8658209adbf/2019/12/11/03-cloudformation-codebuild-role.png">
+</p>
+
+### Create Custom buildspec.yml
+As I mentioned, I am using Java and Maven project so that I need to a custom buildspec file. A _buildspec_ is a collection of build commands and related settings, in YAML format, that CodeBuild uses to run a build. You can include a buildspec as part of the source code or you can define a buildspec when you create a build project.
+
+```yaml
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      java: openjdk11
+
+    commands:
+      - apt-get update -y
+      - apt-get install -y maven
+      - pip3 install --upgrade awscli
+
+  pre_build:
+    commands:
+      - sonar_host_url="http://<instance-address>:<port-number>"
+      - sonar_project_key="$REPOSITORY_NAME"
+      - sonar_username=$(aws secretsmanager get-secret-value --secret-id $SONARQUBE_USER_CREDENTIAL_SECRET | jq -r '.SecretString' | jq -r '.username')
+      - sonar_password=$(aws secretsmanager get-secret-value --secret-id $SONARQUBE_USER_CREDENTIAL_SECRET | jq -r '.SecretString' | jq -r '.password')
+      - git checkout $SOURCE_COMMIT
+
+  build:
+    commands:
+      - mvn install
+      - result=$(mvn clean sonar:sonar -Dsonar.projectKey=$sonar_project_key -Dsonar.host.url=$sonar_host_url -Dsonar.login=$sonar_username -Dsonar.password=$sonar_password)
+      - echo $result
+
+  post_build:
+    commands:
+      - sonar_link=$(echo $result | egrep -o "you can browse http://[^, ]+")
+      - sonar_task_id=$(echo $result | egrep -o "task\?id=[^ ]+" | cut -d'=' -f2)
+      - | # Allow time for SonarQube Background Task to complete
+        stat="PENDING";
+        while [ "$stat" != "SUCCESS" ]; do
+          if [ $stat = "FAILED" ] || [ $stat = "CANCELLED" ]; then
+            echo "SonarQube task $sonar_task_id failed";
+            exit 1;
+          fi
+          stat=$(curl -u "$sonar_username:$sonar_password" $sonar_host_url/api/ce/task\?id=$sonar_task_id | jq -r '.task.status');
+          echo "SonarQube analysis status is $stat";
+          sleep 5;
+        done
+      - sonar_analysis_id=$(curl -u "$sonar_username:$sonar_password" $sonar_host_url/api/ce/task\?id=$sonar_task_id | jq -r '.task.analysisId')
+      - quality_status=$(curl -u "$sonar_username:$sonar_password" $sonar_host_url/api/qualitygates/project_status\?analysisId=$sonar_analysis_id | jq -r '.projectStatus.status')
+      - |
+        if [ $quality_status = "ERROR" ]; then
+          content=$(echo "SonarQube analysis complete. Quality Gate Failed.\n\nTo see why, $sonar_link");
+        elif [ $quality_status = "OK" ]; then
+          content=$(echo "SonarQube analysis complete. Quality Gate Passed.\n\nFor details, $sonar_link");
+          aws codecommit update-pull-request-approval-state --pull-request-id $PULL_REQUEST_ID --approval-state APPROVE --revision-id $REVISION_ID;
+        else
+          content="An unexpected error occurred while attempting to analyze with SonarQube.";
+        fi
+      - aws codecommit post-comment-for-pull-request --pull-request-id $PULL_REQUEST_ID --repository-name $REPOSITORY_NAME --before-commit-id $DESTINATION_COMMIT --after-commit-id $SOURCE_COMMIT --content "$content"
+
+artifacts:
+  files: '**/*'
+```
+
+### Create an Approval Rule Template
+
+Now that your resources are created, create an Approval Rule Template in the CodeCommit console. This template allows you to define a required approver for new pull requests on specific repositories.
+
+1.  On the  [CodeCommit console home](http://console.aws.amazon.com/codecommit/home)  page, choose  **Approval rule templates**  in the left panel. Choose  **Create template**.
+2.  Give the template a name (like  `Require SonarQube approval`) and optionally, a description.
+3.  Set the number of approvals needed as  **1**.
+4.  Under  **Approval pool members**, choose  **Add**.
+5.  Set the approver type to  **Fully qualified ARN**. Since the approver will be the identity obtained by assuming the CodeBuild execution role, your approval pool ARN should be the following string:  
+    `arn:aws:sts::<Your AccountId>:assumed-role/<Your CodeBuild IAM role name>/*`  
+    The CodeBuild IAM role name is the Physical Id of the role you created and noted down above. You can also find the full name either in the  [IAM console](https://console.aws.amazon.com/iam/home)  or the AWS CloudFormation stack details. Adding this role to the approval pool allows any identity assuming your CodeBuild role to satisfy this approval rule.
+6.  Under  **Associated repositories**, find and choose your repository (`PullRequestApproverBlogDemo`). This ensures that any pull requests subsequently created on your repository will have this rule by default.
+7.  Choose  **Create**.
+
+### **Update the repository with a SonarQube endpoint URL**
+
+For this step, you update your CodeCommit repository code to include the endpoint URL of your SonarQube instance. This allows CodeBuild to know where to go to invoke your SonarQube.
+
+You can use the  [AWS Management Console](https://aws.amazon.com/console/)  to make this code change.
+
+1.  Head back to the CodeCommit home page and choose your repository name from the  **Repositories**  list.
+2.  You need a new branch on which to update the code. From the repository page, choose  **Branches**, then  **Create branch**.
+3.  Give the new branch a name (such as  `update-url`) and make sure you are branching from master. Choose  **Create branch**.
+4.  You should now see two branches in the table. Choose the name of your new branch (`update-url`) to start browsing the code on this branch. On the  `update-url`  branch, open the  `buildspec.yml`  file by choosing it.
+5.  Choose  **Edit**  to make a change.
+6.  In the  `pre_build`  steps, modify line 17 with your SonarQube instance url and listen port number, as shown in the following screenshot.![Screenshot showing buildspec yaml code.](https://d2908q01vomqb2.cloudfront.net/7719a1c782a1ba91c031a682a0a2f8658209adbf/2019/12/11/04-pre-build-line-edit.png)
+7.  To save, scroll down and fill out the author, email, and commit message. When you’re happy, commit this by choosing  **Commit changes**.
+
+### Create a Pull Request
+
+You are now ready to create a pull request!
+
+1.  From the CodeCommit console main page, choose  **Repositories**  and  **PullRequestApproverBlogDemo**.
+2.  In the left navigation panel, choose  **Pull Requests**.
+3.  Choose  **Create pull request**.
+4.  Select  `master`  as your destination branch, and your new branch (`update-url`) as the source branch.
+5.  Choose  **Compare**.
+6.  Give your pull request a title and description, and choose  **Create pull request**.
+
+It’s time to see the magic in action. Now that you’ve created your pull request, you should already see that your pull request requires one approver but is not yet approved. This rule comes from the template you created and associated earlier.
+
+You’ll see images like the following screenshot if you browse through the tabs on your pull request:
+
+![Screenshot showing that your pull request has 0 of 1 rule satisfied, with 0 approvals.](https://d2908q01vomqb2.cloudfront.net/7719a1c782a1ba91c031a682a0a2f8658209adbf/2019/12/11/05-pull-request-not-satisfied.png)  ![Screenshot showing a table of approval rules on this pull request which were applied by a template. Require SonarQube approval is listed but not yet satisfied.](https://d2908q01vomqb2.cloudfront.net/7719a1c782a1ba91c031a682a0a2f8658209adbf/2019/12/11/06-sonarqube-rule-not-satisfied.png)
+
+Thanks to the CloudWatch Events Rule, CodeBuild should already be hard at work cloning your repository, performing a build, and invoking your SonarQube instance. It is able to find the SonarQube URL you provided because CodeBuild is cloning the source branch of your pull request. If you choose to peek at your project in the  [CodeBuild console](https://console.aws.amazon.com/codebuild/home), you should see an in-progress build.
+
+Once the build has completed, head back over to your CodeCommit pull request page. If all went well, you’ll be able to see that SonarQube approved your pull request and left you a comment. (Or alternatively, failed and also left you a comment while not approving).
+
+The  **Activity**  tab should resemble that in the following screenshot:
+
+![Screenshot showing that a comment was made by SonarQube through CodeBuild, and that the quality gate passed. The comment includes a link back to the SonarQube instance.](https://d2908q01vomqb2.cloudfront.net/7719a1c782a1ba91c031a682a0a2f8658209adbf/2019/12/11/07-activity-tab.png)
+
+The  **Approvals**  tab should resemble that in the following screenshot:
+
+![Screenshot of Approvals tab on the pull request. The approvals table shows an approval by the SonarQube and that the rule to require SonarQube approval is satisfied.](https://d2908q01vomqb2.cloudfront.net/7719a1c782a1ba91c031a682a0a2f8658209adbf/2019/12/11/08-approvals-tab.png)
