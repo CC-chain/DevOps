@@ -3,7 +3,7 @@
 * AWS EC2 (at least t2.small)
 * JDK 11
 * Latest docker , docker-compose
-* PostgreSQL 13
+* PostgreSQL 12
 * Linux 20.4
 
 I will use docker-compose so I create docker-compose.yml file. You can check it.
@@ -48,7 +48,9 @@ ulimit -n 131072
 ulimit -u 8192
 ```
 But I want to set this numbers permanently so We must update /etc/sysctl.conf.
+
 ![](https://blogger.googleusercontent.com/img/a/AVvXsEi6usx0CVRuiTac0gZp2qUaWijMLzUa3p-qH1TEFzd_tPyqPbju37OeNxm63I-eI177VOI685YBJsfGROWF6sjBCZoqb3kLmxM9QY2RNqPPXHIGI8vIySsaerRBTcAkJXnKyoLAmRyYGKFaBSJLp7LMtXQHJElRb_0dOlv_4v2hthNk08JIc-tzC13o=s312)
+
 
 After we add it, we make sure changes are getting into effect. Add this commands:
 > sudo sysctl -p && sudo apt-get update
@@ -96,8 +98,11 @@ volumes:
 Now we can start our SonarQube and PostgreSQL with one command.
 > sudo docker-compose up
 ## How to use SonarQube with Jenkins
+
 <p align="center">
-<iframe width="661" height="372" src="https://www.youtube.com/embed/Spzk1lrCgNY" title="How to integrate SonarQube & Jenkins | Jenkins SonarQube integration | Run Code scan in SonarQube" frameborder="0" allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" allowfullscreen></iframe>
+
+[![Jenkins video](https://i.ytimg.com/an_webp/wn9wWYAShag/mqdefault_6s.webp?du=3000&sqp=CNDmmZcG&rs=AOn4CLDYivf2bOhC6cbP-a_2_2iloIlDzw)](https://www.youtube.com/watch?v=Spzk1lrCgNY&t=250s)
+
 </p>
 
 ## How to use SonarQube  with Maven
